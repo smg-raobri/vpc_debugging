@@ -36,12 +36,12 @@ jobs:
       - name: Deploy to AWS CloudFormation
         uses: aws-actions/aws-cloudformation-github-deploy@v1
         with:
-          name: VPC-Assignement-S24-Medium-VPC
+          name: VPC-Assignement-S24-Small-VPC
           template: CF_2_Small_Medium_VPC_Deploy.yaml
           #capabilities: CAPABILITY_NAMED_IAM #required as some IAM Stuff needs to be created
           disable-rollback: true
           parameter-overrides: >-
-            vpccidrtype=medium_test,
+            vpccidrtype=small_test,
             primarystack=true,
             requestsnstopic=${{ secrets.VPC_AUTOMATOR_SNS_TOPIC_ARN }},
             tgwassociation=Isolated,
