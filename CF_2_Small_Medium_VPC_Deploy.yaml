@@ -1,0 +1,491 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Template for a Default Network Stack
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network
+        Parameters:
+          - vpccidrtype
+          - internetentry
+          - primarystack
+      - Label:
+          default: SNS
+        Parameters:
+          - requestsnstopic
+    ParameterLabels:
+      vpccidrtype:
+        default: VPC cidr type
+      internetentry:
+        default: Internet entrypoints deployment
+      primarystack:
+        default: Primary network stack, create exports (variables)
+      requestsnstopic:
+        default: Central request SNS topic ARN
+
+
+###############################################################
+### Parameters
+###############################################################
+Parameters:
+  vpccidrtype:
+    Type: String
+    Default: 'medium_test'
+    AllowedValues:
+      - 'medium_prod'
+      - 'medium_test'
+      - 'small_prod'
+      - 'small_test'
+    Description: Select the subnet size for the VPC
+  internetentry:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Whether IGW/Nat-GW and public subnets should be deployed or not
+  primarystack:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Whether to Ids for VPC, Subnets and RoutingTables or not
+  requestsnstopic:
+    Type: String
+    #AllowedPattern: ^arn:aws:sns:*:\d{12}:.+
+  tgwassociation:
+    Type: String
+    Default: "Flat"
+  tgwpropagation:
+    Type: String
+    Default: "Flat"
+
+###############################################################
+### Conditions
+###############################################################
+Conditions:
+  DeployInternetEntry: !Equals [ !Ref internetentry, true]
+  WithExports: !Equals [ !Ref primarystack, true]
+  WithoutExports: !Equals [ !Ref primarystack, false]
+  InternetEntryWithExports: !And
+  - !Equals [ !Ref internetentry, true]
+  - !Equals [ !Ref primarystack, true]
+  InternetEntryWithoutExports: !And
+  - !Equals [ !Ref internetentry, true]
+  - !Equals [ !Ref primarystack, false]
+
+
+###############################################################
+### Resources
+###############################################################
+Resources:
+
+  ###############################################################
+  ### Call VPC CIDR Automator via SNS
+
+  GetVPCCidr:
+    Type: Custom::VPC-Cidr-range-request
+    Version: '1.0'
+    Properties:
+      ServiceToken: !Ref requestsnstopic
+      request: VPC-Cidr-range
+      CidrType: !Ref vpccidrtype
+
+  ###############################################################
+  ### VPC
+
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: !GetAtt GetVPCCidr.Cidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: Blueprint-VPC
+        - Key: Associate-with
+          Value: !Ref tgwassociation 
+        - Key: Propagate-to
+          Value: !Ref tgwpropagation
+
+  ###############################################################
+  ### GWs
+
+  # IGW
+  IGW:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Blueprint-IGW
+
+  GatewayAttach:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      InternetGatewayId: !Ref IGW
+      VpcId: !Ref VPC
+
+  ## NAT
+  EIPNatGWA:
+    DependsOn: GatewayAttach
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: vpc
+
+  EIPNatGWB:
+    DependsOn: GatewayAttach
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: vpc
+
+  NatGatewayA:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId: !GetAtt EIPNatGWA.AllocationId
+      SubnetId: !Ref SubnetPublicA
+      Tags:
+        - Key: Name
+          Value: Blueprint-NatGWA
+
+  NatGatewayB:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId: !GetAtt EIPNatGWB.AllocationId
+      SubnetId: !Ref SubnetPublicB
+      Tags:
+        - Key: Name
+          Value: Blueprint-NatGWB
+
+
+  ###############################################################
+  ### SUBNETs
+
+  SubnetPublicA:
+    DependsOn: Delay1
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ]
+      CidrBlock: !GetAtt GetVPCCidr.subpublicAcidr
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Blueprint-PublicA
+        - Key: Attach-to-tgw  
+          Value: ''
+          
+
+  SubnetPublicB:
+    DependsOn: Delay2
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs ]
+      CidrBlock: !GetAtt GetVPCCidr.subpublicBcidr
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Blueprint-PublicB
+        - Key: Attach-to-tgw
+          Value: ''
+
+  SubnetRouteTableAssociatePublicA:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      SubnetId: !Ref SubnetPublicA
+
+  SubnetRouteTableAssociatePublicB:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      SubnetId: !Ref SubnetPublicB
+
+  SubnetPrivateA:
+    #DependsOn: Delay3
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ]
+      CidrBlock: !GetAtt GetVPCCidr.subprivateAcidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Blueprint-PrivateA
+        #- Key: Attach-to-tgw
+        #  Value: ''
+
+  SubnetPrivateB:
+    #DependsOn: Delay4
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs ]
+      CidrBlock: !GetAtt GetVPCCidr.subprivateBcidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Blueprint-PrivateB
+        #- Key: Attach-to-tgw 
+        #  Value: ''
+
+  SubnetRouteTableAssociatePrivateA:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTablePrivateA
+      SubnetId: !Ref SubnetPrivateA
+
+  SubnetRouteTableAssociatePrivateB:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTablePrivateB
+      SubnetId: !Ref SubnetPrivateB
+
+  ###############################################################
+  ### ROUTETABLEs
+
+  RouteTablePublic:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Blueprint-Public
+
+  RouteTablePrivateA:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Blueprint-PrivateA
+
+  RouteTablePrivateB:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Blueprint-PrivateB
+
+  ###############################################################
+  ### ROUTEs
+
+  PublicDefaultRoute:
+    Type: "AWS::EC2::Route"
+    DependsOn: GatewayAttach
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW
+      RouteTableId: !Ref RouteTablePublic
+
+  PrivateADefaultRoute:
+    Type: "AWS::EC2::Route"
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA
+      RouteTableId: !Ref RouteTablePrivateA
+
+  PrivateBDefaultRoute:
+    Type: "AWS::EC2::Route"
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayB
+      RouteTableId: !Ref RouteTablePrivateB
+
+  ###############################################################
+  ### Delays
+
+  Delay1:
+    Type: 'Custom::Delay'
+    Properties:
+      ServiceToken: !GetAtt DelayFunction.Arn
+      TimeToWait: 120
+      ResName: !Ref VPC
+
+  Delay2:
+    Type: 'Custom::Delay'
+    Properties:
+      ServiceToken: !GetAtt DelayFunction.Arn
+      TimeToWait: 120
+      ResName: !Ref SubnetPublicA
+
+#  Delay3:
+#    Type: 'Custom::Delay'
+#    Properties:
+#      ServiceToken: !GetAtt DelayFunction.Arn
+#      TimeToWait: 120
+#      ResName: !Ref SubnetPublicB
+
+#  Delay4:
+#    Type: 'Custom::Delay'
+#    Properties:
+#      ServiceToken: !GetAtt DelayFunction.Arn
+#      TimeToWait: 120
+#      ResName: !Ref SubnetPrivateA            
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: "lambda-logs"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - "arn:aws:logs:*:*:*"
+
+  DelayFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: "index.handler"
+      Timeout: 150
+      Role: !GetAtt 'LambdaRole.Arn'
+      Runtime: python3.7
+      Code:
+        ZipFile: |
+          import json
+          import cfnresponse
+          import time
+          def handler(event, context):
+            time_to_wait = int(event['ResourceProperties']['TimeToWait'])
+            print('wait started')
+            time.sleep(time_to_wait)
+            responseData = {}
+            responseData['Data'] = "wait complete"
+            print("wait completed")
+            physicalId = event['ResourceProperties']['ResName'] + 'wait'
+            print(physicalId)
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, physicalId)
+
+
+###############################################################
+### Outputs
+###############################################################
+Outputs:
+  VPCExp:
+    Value: !Ref VPC
+    Condition: WithExports
+    Description: VPC
+    Export:
+      Name: VPC
+  VPC:
+    Value: !Ref VPC
+    Condition: WithoutExports
+    Description: VPC
+
+  IGWExp:
+    Value: !Ref IGW
+    Description: IGW
+    Condition: InternetEntryWithExports
+    Export:
+      Name: VPC-IGW
+  IGW:
+    Value: !Ref IGW
+    Description: IGW
+    Condition: InternetEntryWithoutExports
+
+  AvailabilityZone1:
+    Value: !GetAtt SubnetPrivateA.AvailabilityZone
+    Condition: WithExports
+    Export:
+      Name: AvailabilityZone1
+  AvailabilityZone2:
+    Value: !GetAtt SubnetPrivateB.AvailabilityZone
+    Condition: WithExports
+    Export:
+      Name: AvailabilityZone2
+
+  SubnetPublicAExp:
+    Value: !Ref SubnetPublicA
+    Description: Public Subnet A Id
+    Condition: InternetEntryWithExports
+    Export:
+      Name: VPC-SubPublicA
+  SubnetPublicA:
+    Value: !Ref SubnetPublicA
+    Description: Public Subnet A Id
+    Condition: InternetEntryWithoutExports
+
+  SubnetPublicBExp:
+    Value: !Ref SubnetPublicB
+    Description: Public Subnet B Id
+    Condition: InternetEntryWithExports
+    Export:
+      Name: VPC-SubPublicB
+  SubnetPublicB:
+    Value: !Ref SubnetPublicB
+    Description: Public Subnet B Id
+    Condition: InternetEntryWithoutExports
+
+  SubnetPrivateAExp:
+    Value: !Ref SubnetPrivateA
+    Condition: WithExports
+    Description: Private Subnet A Id
+    Export:
+      Name: VPC-SubPrivateA
+  SubnetPrivateA:
+    Value: !Ref SubnetPrivateA
+    Condition: WithoutExports
+    Description: Private Subnet A Id
+
+  SubnetPrivateBExp:
+    Value: !Ref SubnetPrivateB
+    Condition: WithExports
+    Description: Private Subnet B Id
+    Export:
+      Name: VPC-SubPrivateB
+  SubnetPrivateB:
+    Value: !Ref SubnetPrivateB
+    Condition: WithoutExports
+    Description: Private Subnet B Id
+
+  RouteTablePublicExp:
+    Value: !Ref RouteTablePublic
+    Description: Public Route Table
+    Condition: InternetEntryWithExports
+    Export:
+      Name: VPC-RouteTablePublic
+  RouteTablePublic:
+    Value: !Ref RouteTablePublic
+    Condition: InternetEntryWithoutExports
+    Description: Public Route Table
+
+  RouteTablePrivateAExp:
+    Value: !Ref RouteTablePrivateA
+    Condition: WithExports
+    Description: Private A Route Table
+    Export:
+      Name: VPC-RouteTablePrivateA
+  RouteTablePrivateA:
+    Value: !Ref RouteTablePrivateA
+    Condition: WithoutExports
+    Description: Private A Route Table
+
+  RouteTablePrivateBExp:
+    Value: !Ref RouteTablePrivateB
+    Condition: WithExports
+    Description: Private B Route Table
+    Export:
+      Name: VPC-RouteTablePrivateB
+  RouteTablePrivateB:
+    Value: !Ref RouteTablePrivateB
+    Condition: WithoutExports
+    Description: Private B Route Table

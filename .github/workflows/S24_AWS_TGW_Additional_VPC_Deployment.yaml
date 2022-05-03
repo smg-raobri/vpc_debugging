@@ -1,0 +1,37 @@
+
+name: 'Deploy Additional VPC'
+
+# We run on every push to this repository
+on: workflow_dispatch
+
+jobs:
+  spoke-deployment:
+    # We run on the self hosted Linux runner
+    name: 'Deploy VPC Assignement'
+    runs-on: ubuntu-latest
+
+    steps:
+      # We're demonstrating we've checked the source code out.
+      - name: 'Checkout'
+        uses: actions/checkout@v2
+        
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-central-1
+
+      - name: Deploy to AWS CloudFormation
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: VPC-Assignement-S24-Medium-Additional-VPC
+          template: CF_2_Small_Medium_VPC_Deploy.yaml
+          #capabilities: CAPABILITY_NAMED_IAM #required as some IAM Stuff needs to be created
+          disable-rollback: true
+          parameter-overrides: >-
+            vpccidrtype=medium_test,
+            primarystack=false,
+            requestsnstopic=${{ secrets.VPC_AUTOMATOR_SNS_TOPIC_ARN }},
+            tgwassociation=Isolated,
+            tgwpropagation=On-premises
